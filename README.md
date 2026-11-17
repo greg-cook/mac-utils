@@ -7,12 +7,17 @@ built from source with the Swift Package Manager.
 | --- | --- | --- |
 | [Menu Bar Manager](#menu-bar-manager) | Hides the menu bar icons of the apps you choose, behind a chevron | macOS 27 |
 | [Menu Bar Stats](#menu-bar-stats) | Shows CPU use, network throughput and CPU temperature in the menu bar | macOS 26 |
+| [Claude Usage](#claude-usage) | Shows how much of your Claude 5-hour and weekly limits is left | macOS 26, a Claude Code login |
 
-Both are background apps with no Dock icon or window, use almost no CPU while
-idle, collect nothing and make no network connections of their own.
+They are background apps with no Dock icon or window, and use almost no CPU while
+idle. They collect nothing. Menu Bar Manager and Menu Bar Stats make no network
+connections; Claude Usage makes one small request every couple of minutes, to
+Anthropic only.
 
-> **Read this first.** Each app relies on a private, undocumented macOS
-> interface, because Apple offers no public way to do what it does. They work
+> **Read this first.** Menu Bar Manager and Menu Bar Stats each rely on a
+> private, undocumented macOS interface, because Apple offers no public way to
+> do what they do. Claude Usage relies on an undocumented Anthropic endpoint
+> instead. They work
 > today, but a macOS update can break them. See [How they work](#how-they-work)
 > and [Limitations](#limitations). They are not signed with a developer
 > certificate or notarised, so you build them yourself rather than download a
@@ -24,6 +29,7 @@ idle, collect nothing and make no network connections of their own.
 - [Install](#install)
 - [Menu Bar Manager](#menu-bar-manager)
 - [Menu Bar Stats](#menu-bar-stats)
+- [Claude Usage](#claude-usage)
 - [Permissions](#permissions)
 - [Start at login](#start-at-login)
 - [Update and uninstall](#update-and-uninstall)
@@ -50,6 +56,7 @@ git clone https://github.com/greg-cook/mac-utils.git
 cd mac-utils
 ./install.sh menu-bar-manager
 ./install.sh menu-bar-stats
+./install.sh claude-usage
 ```
 
 `install.sh` builds a release binary, wraps it in an app bundle signed ad hoc
@@ -63,7 +70,7 @@ Add `--login` to also start the app every time you log in, see
 ./install.sh --login menu-bar-manager
 ```
 
-To build without installing, run `menu-bar-manager/build-app.sh` or
+To build without installing, run `<app>/build-app.sh`, such as
 `menu-bar-stats/build-app.sh`. The app is written to that folder's `build/`
 directory.
 
@@ -153,12 +160,66 @@ America/New_York    # shown as "New York"
 - The file is read when the app starts, so restart the app after changing it.
 - Only one clock is supported.
 
+## Claude Usage
+
+One menu bar item showing how much of your Claude limits is **left**, as
+`77% / 84%`: the 5-hour limit, then the weekly limit. Click it for each limit's
+percentage left, how long until it resets and when, and how old the reading is.
+
+It asks Anthropic's usage endpoint, the one Claude Code's own `/usage` reads,
+every two minutes and whenever you open the menu. It signs in with the access
+token Claude Code keeps in your login keychain, so it works whether you use
+Claude Code in a terminal, in the desktop app, or not at all. Only you and
+Anthropic see the token: it is read into memory, sent to `api.anthropic.com`
+and never written anywhere.
+
+The first time, macOS asks whether `security` may read the "Claude Code-credentials"
+keychain item. Choose **Always Allow**. The app reads it through `/usr/bin/security`
+so that this approval survives rebuilds, which the app's own ad hoc signature
+would not.
+
+### Fallback: Claude Code's status line
+
+If the request fails (offline, token expired, endpoint changed), the app uses the
+last reading Claude Code's status line gave it, and the menu says so. To enable
+that, add this to `~/.claude/settings.json`:
+
+```json
+{
+  "statusLine": {
+    "type": "command",
+    "command": "/Applications/ClaudeUsage.app/Contents/MacOS/ClaudeUsage capture"
+  }
+}
+```
+
+Claude Code's terminal UI then pipes that command JSON on every update, including
+`rate_limits.five_hour` and `rate_limits.seven_day`. `capture` saves them to
+`~/.config/claude-usage/rate-limits.json` and prints nothing, so your status line
+stays empty. Whichever reading is newer, the file or Anthropic's, is the one shown.
+
+- The desktop app and `claude -p` never run the status line, so the fallback only
+  fills in from terminal sessions.
+- This replaces any status line you already use. To keep one, have your own
+  status line script pipe its input through `ClaudeUsage capture` too.
+
+### Notes
+
+- The menu bar shows `–% / –%` until a reading arrives, and for good if the
+  account has no subscription limits (an API key, for example).
+- A window whose reset time has passed shows 100% left, since it has reset.
+- After a failure the app waits longer between requests, up to ten minutes.
+- The app never renews the token. Claude Code rotates its refresh tokens, so
+  using one here would sign Claude Code out. When the token expires, the app waits
+  for Claude Code to renew it, which it does whenever you use it.
+
 ## Permissions
 
 | App | Permission | Why | Required? |
 | --- | --- | --- | --- |
 | Menu Bar Manager | Accessibility | The right-click menu asks each app whether it has a menu bar icon | Only for the right-click menu |
 | Menu Bar Stats | None | | |
+| Claude Usage | Keychain: read "Claude Code-credentials" | Its sign-in token for Anthropic's usage endpoint | Yes, or it falls back to the status line |
 
 To grant it, open the right-click menu and choose **Allow Accessibility to List
 Apps…**, or go to System Settings → Privacy & Security → Accessibility.
@@ -211,6 +272,14 @@ asking each running app, through Accessibility, whether it has an *extras menu
 bar*, which only apps with a menu bar icon do. That is why it needs the
 permission.
 
+**Claude Usage** sends `GET https://api.anthropic.com/api/oauth/usage` with
+Claude Code's OAuth access token and the `anthropic-beta: oauth-2025-04-20`
+header. The response has `utilization` (percent used) and `resets_at` for the
+`five_hour` and `seven_day` windows; the app shows 100 minus the first. The token
+comes from the login keychain item "Claude Code-credentials", read with
+`/usr/bin/security`. Claude Code also hands the same numbers to a `statusLine`
+command as `rate_limits`, which is what the fallback stores.
+
 **Menu Bar Stats** reads:
 
 - **CPU:** `host_statistics` with `HOST_CPU_LOAD_INFO`, the same counters
@@ -233,6 +302,8 @@ permission.
 - **One list.** Manager has a single list of visible apps. There is no
   per-display or per-space setting.
 - **No Intel temperature**, and no fan speed, disk, memory or battery readings.
+- **Claude Usage depends on an undocumented endpoint** and on Claude Code's
+  keychain item and token format. Either can change without notice.
 - **No preferences window.** Everything is configured with the files above.
 - **Not for the Mac App Store.** Private APIs rule that out, and the apps are
   not notarised.
@@ -254,6 +325,15 @@ See [Permissions](#permissions); the grant is lost on each rebuild.
 **Temperature shows `–°`.**
 The sensors could not be read. This is expected on Intel Macs and may mean macOS
 changed the private interface.
+
+**Claude Usage shows `–% / –%`.**
+Open its menu: the last line says why the request failed. "No Claude Code login
+in the keychain" means you have not signed in to Claude Code on this Mac, or
+denied the keychain prompt. "Token expired" clears once you use Claude Code. If
+the prompt never appeared or you chose Deny, run
+`security find-generic-password -s "Claude Code-credentials" -w >/dev/null` in a
+terminal and choose Always Allow. The status line fallback is described under
+[Claude Usage](#claude-usage).
 
 **Menu bar items are in the wrong order.**
 macOS positions items itself. Hold Cmd and drag an item to move it; the
@@ -280,11 +360,16 @@ menu-bar-stats/
   build-app.sh                 builds MenuBarStats.app into build/
   Sources/MenuBarStats/        the app (AppKit): samplers, drawing, menus
   Sources/DieSensors/          C wrapper for the private temperature API
+claude-usage/
+  Package.swift
+  Info.plist
+  build-app.sh                 builds ClaudeUsage.app into build/
+  Sources/ClaudeUsage/         the app (AppKit), the usage request and the `capture` command
 ```
 
 Each app is its own Swift package with no third-party dependencies. The app
-bundles are identified as `io.github.greg-cook.menu-bar-manager` and
-`io.github.greg-cook.menu-bar-stats`.
+bundles are identified as `io.github.greg-cook.menu-bar-manager`,
+`io.github.greg-cook.menu-bar-stats` and `io.github.greg-cook.claude-usage`.
 
 ## Development
 

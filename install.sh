@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Builds an app, installs it to /Applications and (re)starts it.
-#   ./install.sh menu-bar-manager|menu-bar-stats [--login]
+#   ./install.sh menu-bar-manager|menu-bar-stats|claude-usage [--login]
 # --login also installs a LaunchAgent that starts the app at login.
-#   ./install.sh --uninstall menu-bar-manager|menu-bar-stats
+#   ./install.sh --uninstall menu-bar-manager|menu-bar-stats|claude-usage
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -13,15 +13,16 @@ for arg in "$@"; do
     case $arg in
         --uninstall) uninstall=true ;;
         --login) login=true ;;
-        menu-bar-manager|menu-bar-stats) dir=$arg ;;
-        *) echo "usage: $0 [--uninstall] [--login] menu-bar-manager|menu-bar-stats" >&2; exit 2 ;;
+        menu-bar-manager|menu-bar-stats|claude-usage) dir=$arg ;;
+        *) echo "usage: $0 [--uninstall] [--login] menu-bar-manager|menu-bar-stats|claude-usage" >&2; exit 2 ;;
     esac
 done
-[[ -n $dir ]] || { echo "usage: $0 [--uninstall] [--login] menu-bar-manager|menu-bar-stats" >&2; exit 2; }
+[[ -n $dir ]] || { echo "usage: $0 [--uninstall] [--login] menu-bar-manager|menu-bar-stats|claude-usage" >&2; exit 2; }
 
 case $dir in
     menu-bar-manager) name=MenuBarManager ;;
     menu-bar-stats) name=MenuBarStats ;;
+    claude-usage) name=ClaudeUsage ;;
 esac
 label=io.github.greg-cook.$dir
 plist=$HOME/Library/LaunchAgents/$label.plist
