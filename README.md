@@ -167,7 +167,7 @@ One menu bar item showing how much of your Claude limits is **left**, as
 percentage left, how long until it resets and when, and how old the reading is.
 
 It asks Anthropic's usage endpoint, the one Claude Code's own `/usage` reads,
-every two minutes and whenever you open the menu. It signs in with the access
+every five minutes, and sooner when you open the menu or wake the Mac. It signs in with the access
 token Claude Code keeps in your login keychain, so it works whether you use
 Claude Code in a terminal, in the desktop app, or not at all. Only you and
 Anthropic see the token: it is read into memory, sent to `api.anthropic.com`
@@ -208,7 +208,7 @@ stays empty. Whichever reading is newer, the file or Anthropic's, is the one sho
 - The menu bar shows `–% / –%` until a reading arrives, and for good if the
   account has no subscription limits (an API key, for example).
 - A window whose reset time has passed shows 100% left, since it has reset.
-- After a failure the app waits longer between requests, up to ten minutes.
+- After a failure the app waits longer between requests, up to half an hour. The endpoint limits requests per token, and every app using Claude Code's token shares that limit, so run only one such menu bar app.
 - The app never renews the token. Claude Code rotates its refresh tokens, so
   using one here would sign Claude Code out. When the token expires, the app waits
   for Claude Code to renew it, which it does whenever you use it.

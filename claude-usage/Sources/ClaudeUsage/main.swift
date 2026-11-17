@@ -7,9 +7,13 @@ import AppKit
 @MainActor
 final class UsageController: NSObject, NSMenuDelegate {
     private static let interval: TimeInterval = 15
-    // How often to ask Anthropic. Failures back off, doubling up to ten minutes.
-    private static let fetchInterval: TimeInterval = 120
-    private static let maxBackoff: TimeInterval = 600
+    // How often to ask Anthropic. The endpoint rate limits per token, and every client of Claude
+    // Code's token shares that limit, so ask rarely. Failures back off, doubling up to half an hour.
+    private static let fetchInterval: TimeInterval = 300
+    private static let maxBackoff: TimeInterval = 1800
+    // Opening the menu or waking the Mac fetches sooner, but never twice within this time, and not
+    // at all while failing, since retrying a rate limit only extends it.
+    private static let minimumGap: TimeInterval = 60
     private static let font = NSFont.monospacedDigitSystemFont(
         ofSize: NSFont.systemFontSize, weight: .regular)
 
@@ -54,8 +58,9 @@ final class UsageController: NSObject, NSMenuDelegate {
     }
 
     private func fetchIfDue(force: Bool = false) {
-        let wait = min(Self.maxBackoff, Self.fetchInterval * pow(2, Double(failures)))
-        guard !fetching, Date().timeIntervalSince(lastAttempt) >= (force ? 30 : wait) else { return }
+        let backoff = min(Self.maxBackoff, Self.fetchInterval * pow(2, Double(failures)))
+        let wait = force && failures == 0 ? Self.minimumGap : backoff
+        guard !fetching, Date().timeIntervalSince(lastAttempt) >= wait else { return }
         fetching = true
         lastAttempt = Date()
         Task {
