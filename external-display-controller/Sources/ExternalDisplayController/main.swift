@@ -93,7 +93,10 @@ final class AppController: NSObject, NSMenuDelegate {
         if !keyTap.isActive {
             menu.addItem(.separator())
             menu.addItem(disabledItem("Keys need Accessibility"))
-            menu.addItem(NSMenuItem(title: "Open Accessibility Settings…", action: #selector(openAccessibilitySettings), keyEquivalent: ""))
+            // Without a target, AppKit looks for the action in the responder chain, which has no controller.
+            let open = NSMenuItem(title: "Open Accessibility Settings…", action: #selector(openAccessibilitySettings), keyEquivalent: "")
+            open.target = self
+            menu.addItem(open)
         }
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit External Display Controller", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
