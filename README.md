@@ -312,7 +312,7 @@ or reads VCP code `0x10`, the brightness. The keys are caught with an active
 `CGEventTap` on system-defined media key events. The tap drops a key only when
 the pointer is on a display that answers DDC, and it hands every other key back
 to macOS. No property in the registry says which screen a DDC service belongs to,
-so the app pairs services and external screens by position.
+so the app pairs services and external screens by position, and only when there are as many services as screens.
 
 **Menu Bar Stats** reads:
 
@@ -336,7 +336,7 @@ so the app pairs services and external screens by position.
 - **One list.** Manager has a single list of visible apps. There is no
   per-display or per-space setting.
 - **No Intel temperature**, and no fan speed, disk, memory or battery readings.
-- **External Display Controller sets brightness only**, and has not been tried on Intel. With several external displays, the app can pair a DDC service with the wrong screen, so a key can change a different display from the one under the pointer.
+- **External Display Controller sets brightness only**, and has not been tried on Intel. With several external displays the app can pair a DDC service with the wrong screen. If the counts differ, for example one display plus a Sidecar iPad, it pairs nothing and the menu says so.
 - **Claude Usage depends on an undocumented endpoint** and on Claude Code's
   keychain item and token format. Either can change without notice.
 - **No preferences window.** Everything is configured with the files above.

@@ -29,10 +29,15 @@ final class DisplayController: @unchecked Sendable {
     private let service: OpaquePointer
     private let queue = DispatchQueue(label: "external-display-controller.ddc", qos: .userInitiated)
     private let mailbox = LatestValueMailbox<Int>()
+    private let onUnresponsive: @Sendable () -> Void
+    // Only the DDC queue touches this.
+    private var failures = FailureTracker()
 
-    init(owner: ServiceList, index: Int) {
+    /// `onUnresponsive` runs on the DDC queue after repeated write failures.
+    init(owner: ServiceList, index: Int, onUnresponsive: @escaping @Sendable () -> Void = {}) {
         self.owner = owner
         service = owner[index]
+        self.onUnresponsive = onUnresponsive
     }
 
     func readBrightness(completion: @escaping @Sendable (VCPValue?) -> Void) {
@@ -66,9 +71,9 @@ final class DisplayController: @unchecked Sendable {
 
     private func write(_ value: Int) {
         let packet = DDCPacket.setVCP(code: Self.brightnessCode, value: UInt16(clamping: value))
-        if !DDCWrite(service, DDCPacket.chipAddress, DDCPacket.dataAddress, packet, packet.count) {
-            NSLog("ExternalDisplayController: brightness write failed")
-        }
+        let succeeded = DDCWrite(service, DDCPacket.chipAddress, DDCPacket.dataAddress, packet, packet.count)
+        if !succeeded { NSLog("ExternalDisplayController: brightness write failed") }
+        if failures.record(success: succeeded) { onUnresponsive() }
         usleep(Self.pause)
     }
 }
@@ -84,7 +89,7 @@ struct ExternalDisplay {
 @MainActor
 final class DisplayStore {
     enum State {
-        case interfaceUnavailable, noExternalDisplay, ready
+        case interfaceUnavailable, noExternalDisplay, unmatched, ready
     }
 
     private(set) var displays: [ExternalDisplay] = []
@@ -129,8 +134,22 @@ final class DisplayStore {
         displays[index].cached = value
     }
 
-    func scan() {
+    /// Scans again if a screen has no display, so a display that was not ready after a wake shows up
+    /// without a restart.
+    func rescanIfIncomplete() {
+        if state != .ready || displays.count < Self.externalDisplayIDs().count { scan() }
+    }
+
+    /// A display that stops answering is dropped, so that its keys reach macOS again.
+    private func drop(displayID: CGDirectDisplayID, generation: Int) {
+        guard generation == self.generation else { return }
+        displays.removeAll { $0.displayID == displayID }
+        scan()
+    }
+
+    func scan(attempt: Int = 0) {
         generation += 1
+        let scanGeneration = generation
         displays = []
         guard DDCInterfaceAvailable() else {
             state = .interfaceUnavailable
@@ -142,12 +161,23 @@ final class DisplayStore {
         if services.count != screens.count {
             NSLog("ExternalDisplayController: %d DDC services for %d external screens", services.count, screens.count)
         }
-        // No registry property links a service to a screen, so they are paired by position.
-        for index in 0..<min(services.count, screens.count) {
-            probe(controller: DisplayController(owner: services, index: index), displayID: screens[index], attempt: 0, generation: generation)
+        let pairs = ServicePairing.pair(serviceCount: services.count, screenIDs: screens)
+        for pair in pairs {
+            let controller = DisplayController(owner: services, index: pair.service) { [weak self] in
+                Task { @MainActor in self?.drop(displayID: pair.screen, generation: scanGeneration) }
+            }
+            probe(controller: controller, displayID: pair.screen, attempt: 0, generation: scanGeneration)
         }
-        state = .noExternalDisplay
+        state = pairs.isEmpty && !screens.isEmpty && services.count > 0 ? .unmatched : .noExternalDisplay
         onChange?()
+        // The service can be missing for a while after a wake, so scan again.
+        if services.count == 0, !screens.isEmpty, attempt < ScanRetryPolicy.delays.count {
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(ScanRetryPolicy.delays[attempt]))
+                guard scanGeneration == self.generation else { return }
+                self.scan(attempt: attempt + 1)
+            }
+        }
     }
 
     private func probe(controller: DisplayController, displayID: CGDirectDisplayID, attempt: Int, generation: Int) {
@@ -168,7 +198,7 @@ final class DisplayStore {
         }
     }
 
-    private static func externalDisplayIDs() -> [CGDirectDisplayID] {
+    static func externalDisplayIDs() -> [CGDirectDisplayID] {
         var ids = [CGDirectDisplayID](repeating: 0, count: 16)
         var count: UInt32 = 0
         CGGetActiveDisplayList(16, &ids, &count)

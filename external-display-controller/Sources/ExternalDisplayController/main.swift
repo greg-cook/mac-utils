@@ -11,6 +11,7 @@ final class AppController: NSObject, NSMenuDelegate {
     private var keyTap: KeyTap!
     // When each display was last read. A key press after a long pause reads the display again.
     private var lastRead: [CGDirectDisplayID: Date] = [:]
+    private var staleGuard = StaleReadGuard()
 
     override init() {
         super.init()
@@ -29,6 +30,7 @@ final class AppController: NSObject, NSMenuDelegate {
     func menuNeedsUpdate(_ menu: NSMenu) {
         // The user may have granted Accessibility since the last try.
         keyTap.start()
+        store.rescanIfIncomplete()
         rebuild()
     }
 
@@ -41,9 +43,14 @@ final class AppController: NSObject, NSMenuDelegate {
     private func readAgain(_ display: ExternalDisplay) {
         let id = display.displayID
         lastRead[id] = Date()
+        let token = staleGuard.token(for: id)
         display.controller.readBrightness { value in
             guard let value else { return }
-            Task { @MainActor in self.refresh(displayID: id, value: value) }
+            Task { @MainActor in
+                // A value set since the read started is newer than the reading.
+                guard self.staleGuard.isCurrent(token, for: id) else { return }
+                self.refresh(displayID: id, value: value)
+            }
         }
     }
 
@@ -53,6 +60,7 @@ final class AppController: NSObject, NSMenuDelegate {
         guard case .consume(let id) = KeyRouting.decide(pointerDisplay: pointerDisplay, controllable: store.controllableIDs),
               let display = store.display(withID: id) else { return false }
         let value = BrightnessStep.next(current: Int(display.cached.current), maximum: Int(display.cached.maximum), direction: direction)
+        staleGuard.markChanged(id)
         display.controller.setBrightness(value)
         store.updateCached(displayID: id, value: VCPValue(current: UInt16(value), maximum: display.cached.maximum))
         sliders[id]?.doubleValue = Double(value)
@@ -84,6 +92,8 @@ final class AppController: NSObject, NSMenuDelegate {
             menu.addItem(disabledItem("DDC interface unavailable"))
         case .noExternalDisplay:
             menu.addItem(disabledItem("No external display found"))
+        case .unmatched:
+            menu.addItem(disabledItem("Cannot match the displays to DDC services"))
         case .ready:
             for display in store.displays {
                 menu.addItem(disabledItem(display.name))
@@ -126,6 +136,7 @@ final class AppController: NSObject, NSMenuDelegate {
         let id = CGDirectDisplayID(sender.tag)
         guard let display = store.display(withID: id) else { return }
         let value = Int(sender.doubleValue.rounded())
+        staleGuard.markChanged(id)
         display.controller.setBrightness(value)
         store.updateCached(displayID: id, value: VCPValue(current: UInt16(value), maximum: display.cached.maximum))
     }

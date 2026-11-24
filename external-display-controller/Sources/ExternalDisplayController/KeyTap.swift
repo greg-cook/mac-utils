@@ -12,6 +12,7 @@ final class KeyTap {
 
     private let handle: @MainActor (Direction) -> Bool
     private var tap: CFMachPort?
+    private var source: CFRunLoopSource?
     // Keys whose press was consumed, so that their release is consumed too.
     private var consumed: Set<Int> = []
 
@@ -22,7 +23,8 @@ final class KeyTap {
 
     var isActive: Bool {
         guard let tap else { return false }
-        return CGEvent.tapIsEnabled(tap: tap)
+        // A tap can report enabled after Accessibility was revoked, so ask for the permission too.
+        return AXIsProcessTrusted() && CGEvent.tapIsEnabled(tap: tap)
     }
 
     /// Returns false if Accessibility is off or the tap cannot be created.
@@ -30,6 +32,7 @@ final class KeyTap {
     func start() -> Bool {
         if isActive { return true }
         guard AXIsProcessTrusted() else { return false }
+        removeTap()
         let callback: CGEventTapCallBack = { _, type, event, userInfo in
             let keyTap = Unmanaged<KeyTap>.fromOpaque(userInfo!).takeUnretainedValue()
             // The tap's run loop source is on the main run loop.
@@ -40,16 +43,27 @@ final class KeyTap {
             eventsOfInterest: CGEventMask(1) << CGEventMask(Self.systemDefinedEvent),
             callback: callback, userInfo: Unmanaged.passUnretained(self).toOpaque()
         ) else { return false }
+        let runLoopSource = CFMachPortCreateRunLoopSource(nil, created, 0)
         tap = created
-        CFRunLoopAddSource(CFRunLoopGetMain(), CFMachPortCreateRunLoopSource(nil, created, 0), .commonModes)
+        source = runLoopSource
+        CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
         CGEvent.tapEnable(tap: created, enable: true)
         return true
+    }
+
+    // Each restart makes a new tap, so the old port and its run loop source must go first.
+    private func removeTap() {
+        if let source { CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes) }
+        if let tap { CFMachPortInvalidate(tap) }
+        tap = nil
+        source = nil
     }
 
     private func receive(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         let passThrough = Unmanaged.passUnretained(event)
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-            if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
+            // Without Accessibility the tap stays off, and start() makes a new one after the user grants it.
+            if AXIsProcessTrusted(), let tap { CGEvent.tapEnable(tap: tap, enable: true) }
             return passThrough
         }
         guard type.rawValue == Self.systemDefinedEvent,

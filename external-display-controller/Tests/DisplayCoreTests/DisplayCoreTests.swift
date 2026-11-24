@@ -105,3 +105,54 @@ import DisplayCore
         #expect(ScanRetryPolicy.delays == [2, 6])
     }
 }
+
+@Suite struct ServicePairingTests {
+    @Test func pairsByPositionWhenCountsMatch() {
+        let pairs = ServicePairing.pair(serviceCount: 2, screenIDs: [9, 4])
+        #expect(pairs == [ServicePair(service: 0, screen: 4), ServicePair(service: 1, screen: 9)])
+    }
+
+    @Test func pairsNothingWhenThereAreMoreScreensThanServices() {
+        // One DDC display plus a Sidecar or AirPlay screen: the match would be a guess.
+        #expect(ServicePairing.pair(serviceCount: 1, screenIDs: [3, 5]) == [])
+    }
+
+    @Test func pairsNothingWhenThereAreMoreServicesThanScreens() {
+        #expect(ServicePairing.pair(serviceCount: 2, screenIDs: [3]) == [])
+    }
+
+    @Test func pairsNothingWithNoServices() {
+        #expect(ServicePairing.pair(serviceCount: 0, screenIDs: []) == [])
+    }
+}
+
+@Suite struct StaleReadGuardTests {
+    @Test func readStartedBeforeAChangeIsStale() {
+        var guardian = StaleReadGuard()
+        let token = guardian.token(for: 7)
+        guardian.markChanged(7)
+        #expect(guardian.isCurrent(token, for: 7) == false)
+    }
+
+    @Test func readWithNoChangeIsCurrent() {
+        var guardian = StaleReadGuard()
+        let token = guardian.token(for: 7)
+        guardian.markChanged(8)
+        #expect(guardian.isCurrent(token, for: 7) == true)
+    }
+}
+
+@Suite struct FailureTrackerTests {
+    @Test func reportsAfterTwoFailuresInARow() {
+        var tracker = FailureTracker()
+        #expect(tracker.record(success: false) == false)
+        #expect(tracker.record(success: false) == true)
+    }
+
+    @Test func aSuccessResetsTheCount() {
+        var tracker = FailureTracker()
+        _ = tracker.record(success: false)
+        _ = tracker.record(success: true)
+        #expect(tracker.record(success: false) == false)
+    }
+}
