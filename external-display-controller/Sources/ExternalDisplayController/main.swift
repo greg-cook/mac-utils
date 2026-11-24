@@ -8,9 +8,14 @@ final class AppController: NSObject, NSMenuDelegate {
     private let store = DisplayStore()
     private var sliders: [CGDirectDisplayID: NSSlider] = [:]
     private var menuIsOpen = false
+    private var keyTap: KeyTap!
+    // When each display was last read. A key press after a long pause reads the display again.
+    private var lastRead: [CGDirectDisplayID: Date] = [:]
 
     override init() {
         super.init()
+        keyTap = KeyTap { [weak self] direction in self?.handleBrightnessKey(direction) ?? false }
+        if !keyTap.start() { NSLog("ExternalDisplayController: brightness keys need Accessibility") }
         statusItem.button?.image = NSImage(systemSymbolName: "sun.max", accessibilityDescription: "External display brightness")
         menu.delegate = self
         statusItem.menu = menu
@@ -22,18 +27,42 @@ final class AppController: NSObject, NSMenuDelegate {
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
+        // The user may have granted Accessibility since the last try.
+        keyTap.start()
         rebuild()
     }
 
     func menuWillOpen(_ menu: NSMenu) {
         menuIsOpen = true
         // The display may have changed since the last read, for example from its own buttons.
-        for display in store.displays {
-            let id = display.displayID
-            display.controller.readBrightness { value in
-                guard let value else { return }
-                Task { @MainActor in self.refresh(displayID: id, value: value) }
-            }
+        for display in store.displays { readAgain(display) }
+    }
+
+    private func readAgain(_ display: ExternalDisplay) {
+        let id = display.displayID
+        lastRead[id] = Date()
+        display.controller.readBrightness { value in
+            guard let value else { return }
+            Task { @MainActor in self.refresh(displayID: id, value: value) }
+        }
+    }
+
+    /// Returns true if the key changed an external display, so that macOS does not also see it.
+    private func handleBrightnessKey(_ direction: Direction) -> Bool {
+        let pointerDisplay = store.displayID(at: NSEvent.mouseLocation).flatMap { store.controllableID(for: $0) }
+        guard case .consume(let id) = KeyRouting.decide(pointerDisplay: pointerDisplay, controllable: store.controllableIDs),
+              let display = store.display(withID: id) else { return false }
+        let value = BrightnessStep.next(current: Int(display.cached.current), maximum: Int(display.cached.maximum), direction: direction)
+        display.controller.setBrightness(value)
+        store.updateCached(displayID: id, value: VCPValue(current: UInt16(value), maximum: display.cached.maximum))
+        sliders[id]?.doubleValue = Double(value)
+        if Date().timeIntervalSince(lastRead[id] ?? .distantPast) > 30 { readAgain(display) }
+        return true
+    }
+
+    @objc private func openAccessibilitySettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+            NSWorkspace.shared.open(url)
         }
     }
 
@@ -60,6 +89,11 @@ final class AppController: NSObject, NSMenuDelegate {
                 menu.addItem(disabledItem(display.name))
                 menu.addItem(sliderItem(for: display))
             }
+        }
+        if !keyTap.isActive {
+            menu.addItem(.separator())
+            menu.addItem(disabledItem("Keys need Accessibility"))
+            menu.addItem(NSMenuItem(title: "Open Accessibility Settings…", action: #selector(openAccessibilitySettings), keyEquivalent: ""))
         }
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit External Display Controller", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
