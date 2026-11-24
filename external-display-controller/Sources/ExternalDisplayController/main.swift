@@ -69,6 +69,38 @@ func probe() {
     }
 }
 
+final class Box: @unchecked Sendable {
+    var value: VCPValue?
+}
+
+func readSync(_ controller: DisplayController) -> VCPValue? {
+    let box = Box()
+    let done = DispatchSemaphore(value: 0)
+    controller.readBrightness { value in
+        box.value = value
+        done.signal()
+    }
+    done.wait()
+    return box.value
+}
+
+// Sets brightness 30 to 49 as fast as possible, then reads it back and restores the old value.
+func probeSet() {
+    let services = ServiceList()
+    guard services.count > 0 else { return print("no external services") }
+    let controller = DisplayController(owner: services, index: 0)
+    guard let original = readSync(controller) else { return print("read failed") }
+    print("original: \(original)")
+    for value in 30...49 { controller.setBrightness(value) }
+    sleep(2)
+    print("after 20 rapid sets, expect 49: \(String(describing: readSync(controller)))")
+    controller.setBrightness(Int(original.current))
+    sleep(1)
+    print("restored: \(String(describing: readSync(controller)))")
+}
+
 if CommandLine.arguments.contains("probe") {
     probe()
+} else if CommandLine.arguments.contains("probe-set") {
+    probeSet()
 }
