@@ -1,106 +1,100 @@
 import AppKit
 import DisplayCore
-import DisplayDDC
-import IOKit
 
-// Temporary: `probe` prints what the DDC interface sees, so the display-to-service match can be chosen.
-// It is removed when the menu bar app replaces it.
+@MainActor
+final class AppController: NSObject, NSMenuDelegate {
+    private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+    private let menu = NSMenu()
+    private let store = DisplayStore()
+    private var sliders: [CGDirectDisplayID: NSSlider] = [:]
+    private var menuIsOpen = false
 
-func registryName(_ entry: io_registry_entry_t) -> String {
-    var name = [CChar](repeating: 0, count: 128)
-    IORegistryEntryGetName(entry, &name)
-    return String(decoding: name.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
-}
-
-func dumpProperties(_ entry: io_registry_entry_t, indent: String) {
-    var properties: Unmanaged<CFMutableDictionary>?
-    guard IORegistryEntryCreateCFProperties(entry, &properties, kCFAllocatorDefault, 0) == KERN_SUCCESS,
-          let dictionary = properties?.takeRetainedValue() as? [String: Any] else { return }
-    for key in dictionary.keys.sorted() {
-        print("\(indent)\(key) = \(String(describing: dictionary[key]!).prefix(160))")
-    }
-}
-
-func readBrightness(_ service: OpaquePointer) -> [UInt8]? {
-    let request = DDCPacket.getVCPRequest(code: 0x10)
-    guard DDCWrite(service, DDCPacket.chipAddress, DDCPacket.dataAddress, request, request.count) else { return nil }
-    usleep(50_000)
-    var reply = [UInt8](repeating: 0, count: 11)
-    guard DDCRead(service, DDCPacket.chipAddress, DDCPacket.dataAddress, &reply, reply.count) else { return nil }
-    return reply
-}
-
-func probe() {
-    print("DDC interface available: \(DDCInterfaceAvailable())")
-
-    var ids = [CGDirectDisplayID](repeating: 0, count: 16)
-    var displayCount: UInt32 = 0
-    CGGetActiveDisplayList(16, &ids, &displayCount)
-    for id in ids.prefix(Int(displayCount)) {
-        print("display \(id): builtin=\(CGDisplayIsBuiltin(id) != 0) vendor=\(CGDisplayVendorNumber(id)) model=\(CGDisplayModelNumber(id)) serial=\(CGDisplaySerialNumber(id)) mirrors=\(CGDisplayMirrorsDisplay(id))")
-    }
-
-    var count = 0
-    guard let services = DDCCopyExternalServices(&count) else {
-        print("no external services")
-        return
-    }
-    defer { DDCFreeServices(services, count) }
-    for index in 0..<count {
-        let service = services[index]
-        let entry = DDCServiceRegistryEntry(service)
-        print("\nservice \(index): \(registryName(entry))")
-        dumpProperties(entry, indent: "  ")
-        var current = entry
-        for _ in 0..<4 {
-            var parent: io_registry_entry_t = 0
-            guard IORegistryEntryGetParentEntry(current, kIOServicePlane, &parent) == KERN_SUCCESS else { break }
-            print("  parent: \(registryName(parent))")
-            dumpProperties(parent, indent: "    ")
-            current = parent
+    override init() {
+        super.init()
+        statusItem.button?.image = NSImage(systemSymbolName: "sun.max", accessibilityDescription: "External display brightness")
+        menu.delegate = self
+        statusItem.menu = menu
+        store.onChange = { [weak self] in
+            guard let self, self.menuIsOpen else { return }
+            self.rebuild()
         }
-        if let reply = readBrightness(service) {
-            let hex = reply.map { String(format: "%02X", $0) }.joined(separator: " ")
-            print("  brightness reply: \(hex)")
-            print("  parsed: \(String(describing: DDCPacket.parseGetReply(reply, code: 0x10)))")
-        } else {
-            print("  brightness read failed")
+        store.scan()
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        rebuild()
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        menuIsOpen = true
+        // The display may have changed since the last read, for example from its own buttons.
+        for display in store.displays {
+            let id = display.displayID
+            display.controller.readBrightness { value in
+                guard let value else { return }
+                Task { @MainActor in self.refresh(displayID: id, value: value) }
+            }
         }
     }
-}
 
-final class Box: @unchecked Sendable {
-    var value: VCPValue?
-}
-
-func readSync(_ controller: DisplayController) -> VCPValue? {
-    let box = Box()
-    let done = DispatchSemaphore(value: 0)
-    controller.readBrightness { value in
-        box.value = value
-        done.signal()
+    func menuDidClose(_ menu: NSMenu) {
+        menuIsOpen = false
     }
-    done.wait()
-    return box.value
+
+    private func refresh(displayID: CGDirectDisplayID, value: VCPValue) {
+        store.updateCached(displayID: displayID, value: value)
+        sliders[displayID]?.maxValue = Double(value.maximum)
+        sliders[displayID]?.doubleValue = Double(value.current)
+    }
+
+    private func rebuild() {
+        menu.removeAllItems()
+        sliders = [:]
+        switch store.state {
+        case .interfaceUnavailable:
+            menu.addItem(disabledItem("DDC interface unavailable"))
+        case .noExternalDisplay:
+            menu.addItem(disabledItem("No external display found"))
+        case .ready:
+            for display in store.displays {
+                menu.addItem(disabledItem(display.name))
+                menu.addItem(sliderItem(for: display))
+            }
+        }
+        menu.addItem(.separator())
+        menu.addItem(NSMenuItem(title: "Quit External Display Controller", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+    }
+
+    private func disabledItem(_ title: String) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        item.isEnabled = false
+        return item
+    }
+
+    private func sliderItem(for display: ExternalDisplay) -> NSMenuItem {
+        let slider = NSSlider(value: Double(display.cached.current), minValue: 0, maxValue: Double(display.cached.maximum),
+                              target: self, action: #selector(sliderMoved(_:)))
+        slider.tag = Int(display.displayID)
+        slider.isContinuous = true
+        slider.frame = NSRect(x: 16, y: 4, width: 188, height: 20)
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 220, height: 28))
+        container.addSubview(slider)
+        sliders[display.displayID] = slider
+        let item = NSMenuItem()
+        item.view = container
+        return item
+    }
+
+    @objc private func sliderMoved(_ sender: NSSlider) {
+        let id = CGDirectDisplayID(sender.tag)
+        guard let display = store.display(withID: id) else { return }
+        let value = Int(sender.doubleValue.rounded())
+        display.controller.setBrightness(value)
+        store.updateCached(displayID: id, value: VCPValue(current: UInt16(value), maximum: display.cached.maximum))
+    }
 }
 
-// Sets brightness 30 to 49 as fast as possible, then reads it back and restores the old value.
-func probeSet() {
-    let services = ServiceList()
-    guard services.count > 0 else { return print("no external services") }
-    let controller = DisplayController(owner: services, index: 0)
-    guard let original = readSync(controller) else { return print("read failed") }
-    print("original: \(original)")
-    for value in 30...49 { controller.setBrightness(value) }
-    sleep(2)
-    print("after 20 rapid sets, expect 49: \(String(describing: readSync(controller)))")
-    controller.setBrightness(Int(original.current))
-    sleep(1)
-    print("restored: \(String(describing: readSync(controller)))")
-}
-
-if CommandLine.arguments.contains("probe") {
-    probe()
-} else if CommandLine.arguments.contains("probe-set") {
-    probeSet()
-}
+let application = NSApplication.shared
+application.setActivationPolicy(.accessory)
+let appController = AppController()
+application.run()
