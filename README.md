@@ -8,16 +8,19 @@ built from source with the Swift Package Manager.
 | [Menu Bar Manager](#menu-bar-manager) | Hides the menu bar icons of the apps you choose, behind a chevron | macOS 27 |
 | [Menu Bar Stats](#menu-bar-stats) | Shows CPU use, network throughput and CPU temperature in the menu bar | macOS 26 |
 | [Claude Usage](#claude-usage) | Shows how much of your Claude 5-hour and weekly limits is left | macOS 26, a Claude Code login |
+| [External Display Controller](#external-display-controller) | Changes the brightness of an external display with a slider and the keyboard brightness keys | macOS 26, a display that supports DDC/CI |
 
 They are background apps with no Dock icon or window, and use almost no CPU while
 idle. They collect nothing. Menu Bar Manager and Menu Bar Stats make no network
 connections; Claude Usage makes one small request every couple of minutes, to
-Anthropic only.
+Anthropic only. External Display Controller talks only to your display, over its
+cable.
 
 > **Read this first.** Menu Bar Manager and Menu Bar Stats each rely on a
 > private, undocumented macOS interface, because Apple offers no public way to
 > do what they do. Claude Usage relies on an undocumented Anthropic endpoint
-> instead. They work
+> instead. External Display Controller relies on a private macOS interface to
+> reach the display. They work
 > today, but a macOS update can break them. See [How they work](#how-they-work)
 > and [Limitations](#limitations). They are not signed with a developer
 > certificate or notarised, so you build them yourself rather than download a
@@ -30,6 +33,7 @@ Anthropic only.
 - [Menu Bar Manager](#menu-bar-manager)
 - [Menu Bar Stats](#menu-bar-stats)
 - [Claude Usage](#claude-usage)
+- [External Display Controller](#external-display-controller)
 - [Permissions](#permissions)
 - [Start at login](#start-at-login)
 - [Update and uninstall](#update-and-uninstall)
@@ -57,6 +61,7 @@ cd mac-utils
 ./install.sh menu-bar-manager
 ./install.sh menu-bar-stats
 ./install.sh claude-usage
+./install.sh external-display-controller
 ```
 
 `install.sh` builds a release binary, wraps it in an app bundle signed ad hoc
@@ -213,6 +218,25 @@ stays empty. Whichever reading is newer, the file or Anthropic's, is the one sho
   using one here would sign Claude Code out. When the token expires, the app waits
   for Claude Code to renew it, which it does whenever you use it.
 
+## External Display Controller
+
+One menu bar item with a brightness slider for each external display that answers
+DDC/CI, the control channel inside the display cable. The brightness keys on the
+keyboard change the external display too: if the mouse pointer is on that
+display, the key changes it and the built-in screen stays as it is. If the pointer
+is on the built-in screen, the keys work as usual.
+
+- One key press moves the brightness by 1/16 of the display's range.
+- Opening the menu reads the display again, so a change made with the display's
+  own buttons shows correctly.
+- The keys need the [Accessibility permission](#permissions). The sliders do not.
+  Until you grant it, the menu says "Keys need Accessibility" and the keys reach
+  macOS as normal.
+- It controls brightness only. There is no volume control.
+
+Some displays ignore DDC/CI changes until you turn it on in their own on-screen
+menu. If the slider moves but the display does not change, check that menu.
+
 ## Permissions
 
 | App | Permission | Why | Required? |
@@ -220,6 +244,7 @@ stays empty. Whichever reading is newer, the file or Anthropic's, is the one sho
 | Menu Bar Manager | Accessibility | The right-click menu asks each app whether it has a menu bar icon | Only for the right-click menu |
 | Menu Bar Stats | None | | |
 | Claude Usage | Keychain: read "Claude Code-credentials" | Its sign-in token for Anthropic's usage endpoint | Yes, or it falls back to the status line |
+| External Display Controller | Accessibility | Its event tap sees the brightness keys before macOS does | Only for the keys |
 
 To grant it, open the right-click menu and choose **Allow Accessibility to List
 Apps…**, or go to System Settings → Privacy & Security → Accessibility.
@@ -280,6 +305,15 @@ comes from the login keychain item "Claude Code-credentials", read with
 `/usr/bin/security`. Claude Code also hands the same numbers to a `statusLine`
 command as `rate_limits`, which is what the fallback stores.
 
+**External Display Controller** sends DDC/CI messages to the display over I2C
+(a two-wire bus) through Apple's private `IOAVService` interface, which has no
+public header. The app looks up its three functions at run time. A message sets
+or reads VCP code `0x10`, the brightness. The keys are caught with an active
+`CGEventTap` on system-defined media key events. The tap drops a key only when
+the pointer is on a display that answers DDC, and it hands every other key back
+to macOS. No property in the registry says which screen a DDC service belongs to,
+so the app pairs services and external screens by position.
+
 **Menu Bar Stats** reads:
 
 - **CPU:** `host_statistics` with `HOST_CPU_LOAD_INFO`, the same counters
@@ -302,6 +336,7 @@ command as `rate_limits`, which is what the fallback stores.
 - **One list.** Manager has a single list of visible apps. There is no
   per-display or per-space setting.
 - **No Intel temperature**, and no fan speed, disk, memory or battery readings.
+- **External Display Controller sets brightness only**, and has not been tried on Intel. With several external displays, the app can pair a DDC service with the wrong screen, so a key can change a different display from the one under the pointer.
 - **Claude Usage depends on an undocumented endpoint** and on Claude Code's
   keychain item and token format. Either can change without notice.
 - **No preferences window.** Everything is configured with the files above.
@@ -365,11 +400,20 @@ claude-usage/
   Info.plist
   build-app.sh                 builds ClaudeUsage.app into build/
   Sources/ClaudeUsage/         the app (AppKit), the usage request and the `capture` command
+external-display-controller/
+  Package.swift
+  Info.plist
+  build-app.sh                 builds ExternalDisplayController.app into build/
+  Sources/DisplayCore/         DDC packets, key decoding and routing, with no hardware access
+  Sources/DisplayDDC/          C wrapper for the private IOAVService interface
+  Sources/ExternalDisplayController/  the app (AppKit): menu, display scan, key tap
+  Tests/DisplayCoreTests/      unit tests, run with `swift test`
 ```
 
 Each app is its own Swift package with no third-party dependencies. The app
 bundles are identified as `io.github.greg-cook.menu-bar-manager`,
-`io.github.greg-cook.menu-bar-stats` and `io.github.greg-cook.claude-usage`.
+`io.github.greg-cook.menu-bar-stats`, `io.github.greg-cook.claude-usage` and
+`io.github.greg-cook.external-display-controller`.
 
 ## Development
 
